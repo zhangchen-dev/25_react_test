@@ -1,9 +1,20 @@
 {
   "scripts": {
-    "build-util": "rollup -c rollup.config.js",
-    "start-util": "rollup -c rollup.config.js -w"
+    "rollup-build-util": "rollup -c rollup.config.js",
+    "rollup-start-util": "rollup -c rollup.config.js -w",
+    "webpack-build": "webpack --mode=production",
+    "webpack-dev": "webpack serve --mode=development"
   },
   "devDependencies": {
-    "rollup": "^4.53.2"
+    "babel-loader": "^10.0.0",
+    "css-loader": "^7.1.2",
+    "html-webpack-plugin": "^5.6.4",
+    "rollup": "^4.53.2",
+    "style-loader": "^4.0.0",
+    "ts-loader": "^9.5.4",
+    "typescript": "^5.3.3",
+    "webpack": "^5.102.1",
+    "webpack-cli": "^6.0.1",
+    "webpack-dev-server": "^5.0.4"
   }
 }
