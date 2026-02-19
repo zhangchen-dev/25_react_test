@@ -1,0 +1,84 @@
+.home-page {
+  padding: 20px;
+  max-width: 1200px;
+  margin: 0 auto;
+
+  .quick-build-module,
+  .module-two,
+  .module-three,
+  .module-four {
+    background-color: #fff;
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    margin-bottom: 20px;
+    overflow: hidden;
+
+    .banner {
+      background: linear-gradient(to right, #667eea, #764ba2);
+      color: white;
+      padding: 20px;
+
+      .banner-content {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+
+        .date-info h2 {
+          margin: 0;
+          font-size: 1.5rem;
+        }
+
+        .login-info {
+          text-align: right;
+
+          .user-avatar {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+
+            img {
+              width: 40px;
+              height: 40px;
+              border-radius: 50%;
+            }
+
+            .username {
+              font-weight: bold;
+            }
+          }
+        }
+      }
+    }
+
+    .module-content {
+      padding: 20px;
+      cursor: pointer;
+
+      h2 {
+        margin-top: 0;
+        color: #333;
+      }
+
+      p {
+        color: #666;
+        line-height: 1.6;
+      }
+    }
+  }
+
+  // Grid layout for modules - two per row
+  .modules-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(48%, 1fr));
+    gap: 20px;
+
+    @media (max-width: 768px) {
+      grid-template-columns: 1fr;
+    }
+    }
+  }
+
+// Apply grid to direct children sections
+.home-page > section {
+  break-inside: avoid;
+}

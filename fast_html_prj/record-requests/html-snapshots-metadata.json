@@ -1,0 +1,10 @@
+[
+  {
+    "snapshotId": "snapshot_1",
+    "action": "start_recording",
+    "timestamp": "2026-02-18T10:36:12.039Z",
+    "url": "https://example.com/",
+    "title": "Example Domain",
+    "filePath": "record-requests\\html_snapshots\\snapshot_1_example.com_.html"
+  }
+]

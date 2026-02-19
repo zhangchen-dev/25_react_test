@@ -1,0 +1,13 @@
+{
+  "recordTime": "2026-02-18T10:36:20.068Z",
+  "totalRequests": 1,
+  "totalHtmlSnapshots": 1,
+  "successRequests": 0,
+  "failedRequests": 0,
+  "outputFiles": {
+    "requests": "D:\\FILE\\程序员的自我修养\\myProject_2025\\fast_html_prj\\record-requests\\raw-requests.json",
+    "htmlSnapshotsMetadata": "D:\\FILE\\程序员的自我修养\\myProject_2025\\fast_html_prj\\record-requests\\html-snapshots-metadata.json",
+    "htmlSnapshotsDirectory": "record-requests\\html_snapshots"
+  },
+  "tips": "所有请求/响应和HTML数据均为原始格式，未做任何修改"
+}
