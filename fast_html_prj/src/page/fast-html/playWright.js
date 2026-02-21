@@ -1,6 +1,7 @@
-// page-recorder.js（最终版：仅原封不动捕获请求/响应，不修改页面内容）
+// page-recorder.js（多线程写入版：解决请求写入丢失问题）
 const fs = require("fs-extra");
 const path = require("path");
+const { Worker } = require('worker_threads'); // 引入Worker线程
 // 兼容性补丁：某些依赖（undici 的 webidl）在旧版 Node 中期望全局 File
 if (typeof File === "undefined") {
   global.File = class File {};
@@ -17,18 +18,176 @@ const recordState = {
   outputDir: "./record-requests", // 仅存储请求数据的目录
   requestIdCounter: 1, // 唯一请求ID，便于追踪
   snapshotIdCounter: 1, // HTML快照ID
+  // Worker相关状态
+  writerWorker: null, // 文件写入Worker实例
+  workerReady: false, // Worker是否就绪
+  taskQueue: [], // 待处理的写入任务队列
+  taskIdCounter: 1, // 任务ID计数器
+  pendingTasks: new Map(), // 等待结果的任务（taskId -> resolve/reject）
 };
 
 /**
- * 初始化输出目录（确保目录存在）
+ * 初始化文件写入Worker（单例）
+ */
+const initWriterWorker = async () => {
+  if (recordState.writerWorker) return;
+
+  // 创建Worker实例
+  const worker = new Worker(path.join(__dirname, 'file-writer.worker.js'), {
+    workerData: { outputDir: recordState.outputDir }
+  });
+
+  // 监听Worker消息
+  worker.on('message', (msg) => {
+    if (msg.type === 'WORKER_READY') {
+      // Worker就绪，处理排队的任务
+      recordState.workerReady = true;
+      console.log(`📌 文件写入Worker已就绪`);
+      processTaskQueue();
+      return;
+    }
+
+    if (msg.type === 'EXIT_SUCCESS') {
+      console.log(`📌 文件写入Worker已正常退出`);
+      return;
+    }
+
+    // 处理任务结果
+    const taskId = msg.taskId;
+    const taskPromise = recordState.pendingTasks.get(taskId);
+    if (taskPromise) {
+      const { resolve, reject } = taskPromise;
+      if (msg.result.success) {
+        resolve(msg.result.data);
+      } else {
+        reject(new Error(msg.result.error));
+      }
+      recordState.pendingTasks.delete(taskId);
+    }
+  });
+
+  // 监听Worker错误
+  worker.on('error', (error) => {
+    console.error(`❌ 文件写入Worker出错:`, error.message);
+    // 拒绝所有待处理任务
+    recordState.pendingTasks.forEach(({ reject }) => {
+      reject(new Error(`Worker出错: ${error.message}`));
+    });
+    recordState.pendingTasks.clear();
+    recordState.workerReady = false;
+  });
+
+  // 监听Worker退出
+  worker.on('exit', (code) => {
+    if (code !== 0) {
+      console.error(`❌ 文件写入Worker异常退出，退出码: ${code}`);
+      recordState.workerReady = false;
+    }
+    recordState.writerWorker = null;
+  });
+
+  recordState.writerWorker = worker;
+};
+
+/**
+ * 向Worker发送任务（带重试和队列）
+ */
+const sendTaskToWorker = (taskType, taskData) => {
+  return new Promise((resolve, reject) => {
+    const taskId = recordState.taskIdCounter++;
+    const task = {
+      taskId,
+      type: taskType,
+      data: taskData
+    };
+
+    // 存储Promise的resolve/reject
+    recordState.pendingTasks.set(taskId, { resolve, reject });
+
+    // 如果Worker未就绪，加入队列；否则直接发送
+    if (recordState.workerReady && recordState.writerWorker) {
+      // 处理Buffer传输（避免拷贝）
+      if (taskData.buffer) {
+        recordState.writerWorker.postMessage(task, [taskData.buffer.buffer]);
+      } else {
+        recordState.writerWorker.postMessage(task);
+      }
+    } else {
+      recordState.taskQueue.push(task);
+      console.log(`📌 任务${taskId}(${taskType})已加入队列，等待Worker就绪`);
+    }
+  });
+};
+
+/**
+ * 处理任务队列
+ */
+const processTaskQueue = () => {
+  if (!recordState.workerReady || !recordState.writerWorker || recordState.taskQueue.length === 0) {
+    return;
+  }
+
+  // 批量发送队列中的任务
+  while (recordState.taskQueue.length > 0) {
+    const task = recordState.taskQueue.shift();
+    if (task.data.buffer) {
+      recordState.writerWorker.postMessage(task, [task.data.buffer.buffer]);
+    } else {
+      recordState.writerWorker.postMessage(task);
+    }
+    console.log(`📌 发送队列任务${task.taskId}(${task.type})到Worker`);
+  }
+};
+
+/**
+ * 等待所有待处理任务完成
+ */
+const waitForAllTasks = async () => {
+  if (recordState.pendingTasks.size === 0) return;
+
+  console.log(`📌 等待${recordState.pendingTasks.size}个待处理写入任务完成...`);
+  await new Promise((resolve) => {
+    const checkInterval = setInterval(() => {
+      if (recordState.pendingTasks.size === 0) {
+        clearInterval(checkInterval);
+        resolve();
+      }
+    }, 100);
+  });
+  console.log(`📌 所有写入任务已完成`);
+};
+
+/**
+ * 关闭Worker
+ */
+const closeWriterWorker = async () => {
+  if (!recordState.writerWorker) return;
+
+  // 先等待所有任务完成
+  await waitForAllTasks();
+
+  // 发送退出指令
+  recordState.writerWorker.postMessage('EXIT');
+  
+  // 等待Worker退出
+  await new Promise((resolve) => {
+    recordState.writerWorker.on('exit', resolve);
+  });
+  
+  recordState.writerWorker = null;
+  recordState.workerReady = false;
+};
+
+/**
+ * 初始化输出目录（通过Worker处理）
  */
 const initOutputDir = async (outputDir) => {
-  // 如果目录已存在，清空旧内容以保证每次录制干净开始
-  if (await fs.pathExists(outputDir)) {
-    await fs.emptyDir(outputDir);
-  } else {
-    await fs.ensureDir(outputDir);
-  }
+  // 先初始化Worker
+  await initWriterWorker();
+  
+  // 发送初始化目录任务
+  await sendTaskToWorker('initOutputDir', { outputDir });
+  
   recordState.outputDir = outputDir;
   console.log(`📁 请求数据输出目录已初始化（已清空旧内容）：${path.resolve(outputDir)}`);
 };
@@ -46,7 +205,6 @@ const listenPageRequests = (page) => {
 
     // 扩展资源类型捕获，包括文档和脚本等可能影响HTML的内容
     const resourceType = request.resourceType();
-    // if (!["xhr", "fetch", "document", "script", "stylesheet"].includes(resourceType)) return;
 
     // 生成唯一请求ID，便于关联请求和响应
     const requestId = `req_${recordState.requestIdCounter++}`;
@@ -129,10 +287,15 @@ const listenPageRequests = (page) => {
         // ignore fallback errors
       }
 
-      // 尝试将响应体保存为独立资源文件，记录相对路径
+      // 尝试将响应体保存为独立资源文件（通过Worker处理）
       let localPath = null;
       try {
-        localPath = await saveResourceBuffer(request.url(), responseBody, response.headers());
+        localPath = await sendTaskToWorker('saveResourceBuffer', {
+          url: request.url(),
+          buffer: responseBody,
+          headers: response.headers(),
+          outputDir: recordState.outputDir
+        });
       } catch (e) {
         console.warn(`⚠️ 保存资源失败: ${request.url()}`, e.message);
       }
@@ -194,82 +357,6 @@ const listenPageRequests = (page) => {
     }
   });
 };
-/**
- * 将URL转换为安全的文件名
- */
-const sanitizeFilename = (url) => {
-  try {
-    let cleanUrl = String(url || "").replace(/^https?:\/\//, "");
-    cleanUrl = cleanUrl.replace(/[<>:\"/\\|?*]/g, "_");
-    if (cleanUrl.length > 150) cleanUrl = cleanUrl.substring(0, 150);
-    if (!cleanUrl) cleanUrl = "unnamed";
-    return cleanUrl;
-  } catch (e) {
-    return "unnamed";
-  }
-};
-
-// 将 URL 映射为相对于 outputDir 的本地路径（保留目录结构）
-const getLocalRelativePath = (url, headers = {}) => {
-  try {
-    const parsed = new URL(url);
-    // 使用 pathname 作为目录结构（尽量保留原始路径）
-    let pathname = decodeURIComponent(parsed.pathname || "/");
-    if (!pathname || pathname === "/") pathname = "/index.html";
-
-    // 如果路径以 / 结尾，补上 index.html
-    if (pathname.endsWith("/")) pathname += "index.html";
-
-    // 不再把查询参数作为文件名后缀，优先保留原始 pathname（只在冲突时用后缀）
-    // 确保有扩展名（尝试根据 content-type 推断）
-    let ext = path.extname(pathname);
-    if (!ext) {
-      const guessed = getExtensionFrom(url, headers) || "";
-      if (guessed) pathname += guessed;
-      ext = path.extname(pathname);
-    }
-
-    // 合并并清理非法字符，但保留目录结构
-    const parts = pathname.split("/").map((p) => p.replace(/[<>:\"|?*]/g, "_"));
-    let rel = parts.join("/");
-    // 去掉可能的前导斜杠
-    rel = rel.replace(/^\/+/, "");
-    return rel;
-  } catch (e) {
-    // fallback 到安全文件名
-    const name = sanitizeFilename(url);
-    return `misc/${name}`;
-  }
-};
-
-/**
- * 尝试根据 URL 或响应头推断扩展名
- */
-const getExtensionFrom = (url, headers = {}) => {
-  // 先尝试从 URL 路径中提取扩展名
-  try {
-    const parsed = new URL(url);
-    const extFromPath = path.extname(parsed.pathname || "");
-    if (extFromPath) return extFromPath;
-  } catch (e) {
-    // 忽略 URL 解析错误
-  }
-
-  // 再尝试从 Content-Type 头判断
-  const ct = (headers["content-type"] || headers["Content-Type"] || "").toLowerCase();
-  if (ct.includes("javascript")) return ".js";
-  if (ct.includes("json")) return ".json";
-  if (ct.includes("text/html")) return ".html";
-  if (ct.includes("css")) return ".css";
-  if (ct.includes("image/png")) return ".png";
-  if (ct.includes("image/jpeg") || ct.includes("image/jpg")) return ".jpg";
-  if (ct.includes("image/gif")) return ".gif";
-  if (ct.includes("svg")) return ".svg";
-  if (ct.includes("font")) return ".woff";
-  if (ct.includes("audio")) return ".mp3";
-  if (ct.includes("video")) return ".mp4";
-  return "";
-};
 
 // 使用 node fetch（全局 fetch）获取资源，返回 {status, headers, buffer}
 const fetchResource = async (absolute, headers = {}) => {
@@ -315,26 +402,6 @@ const toSnapshotRelative = (savedRel, snapshotFilePath) => {
 };
 
 /**
- * 保存资源二进制到 outputDir/resources，并返回相对于 outputDir 的路径
- */
-const saveResourceBuffer = async (url, buffer, headers = {}) => {
-  try {
-    // 生成与请求路径一致的相对路径
-    const rel = getLocalRelativePath(url, headers);
-    const filePath = path.join(recordState.outputDir, rel);
-    await fs.ensureDir(path.dirname(filePath));
-    if (!(await fs.pathExists(filePath))) {
-      await fs.writeFile(filePath, buffer);
-    }
-    // 返回相对于 outputDir 的路径（用于 HTML 重写）
-    return rel.replace(/\\/g, "/");
-  } catch (e) {
-    console.error("保存资源失败", url, e.message);
-    return null;
-  }
-};
-
-/**
  * 获取页面的完整HTML，包括动态内容
  */
 const getFullPageHtml = async (page) => {
@@ -376,26 +443,34 @@ const getFullPageHtml = async (page) => {
 };
 
 /**
- * 保存完整的、可用的HTML快照
+ * 保存完整的、可用的HTML快照（通过Worker处理写入）
  */
 const captureHtmlSnapshot = async (page, actionDescription = "initial") => {
   if (!recordState.isRecording) return;
 
   try {
     // 获取完整页面内容
-    const { html, title, resources } = await getFullPageHtml(page);
+    const { html, title } = await getFullPageHtml(page);
 
     const url = page.url();
     const timestamp = new Date().toISOString();
     const snapshotId = `snapshot_${recordState.snapshotIdCounter++}`;
 
     // 创建安全的文件名
-    const sanitizedFilename = sanitizeFilename(url);
+    const sanitizedFilename = (() => {
+      try {
+        let cleanUrl = String(url || "").replace(/^https?:\/\//, "");
+        cleanUrl = cleanUrl.replace(/[<>:\"/\\|?*]/g, "_");
+        if (cleanUrl.length > 150) cleanUrl = cleanUrl.substring(0, 150);
+        if (!cleanUrl) cleanUrl = "unnamed";
+        return cleanUrl;
+      } catch (e) {
+        return "unnamed";
+      }
+    })();
+    
     const fileName = `${snapshotId}_${sanitizedFilename}.html`;
     const filePath = path.join(recordState.outputDir, "html_snapshots", fileName);
-
-    // 确保html_snapshots目录存在
-    await fs.ensureDir(path.dirname(filePath));
 
     // 尝试保存完整的可用HTML
     let fullHtml = html;
@@ -539,14 +614,12 @@ const captureHtmlSnapshot = async (page, actionDescription = "initial") => {
           // 处理 CSS 特殊情况：需要解析 CSS 中的 url(...) 并下载
           const contentType = (fetched.headers["content-type"] || "").toLowerCase();
           const isCss = contentType.includes("css") || absolute.endsWith(".css");
-          const isJs = contentType.includes("javascript") || absolute.endsWith(".js");
-
           let buffer = fetched.buffer;
 
           if (isCss) {
             // 解析 CSS 中的 url(...) 并下载内嵌资源
             let cssText = buffer.toString("utf8");
-            const urlMatches = [...cssText.matchAll(/url\((?:'|")?(.*?)(?:'|\")?\)/g)];
+            const urlMatches = [...cssText.matchAll(/url\((?:'|")?(.*?)(?:'|")?\)/g)];
             for (const m of urlMatches) {
               const inner = m[1];
               if (!inner) continue;
@@ -556,9 +629,14 @@ const captureHtmlSnapshot = async (page, actionDescription = "initial") => {
                 const rr = await fetchResource(innerAbs, { referer: absolute, "user-agent": pageUA, cookie: innerCookies });
                 if (rr && rr.status < 400) {
                   const innerBuf = rr.buffer;
-                  const saved = await saveResourceBuffer(innerAbs, innerBuf, rr.headers);
+                  // 保存内嵌资源（通过Worker）
+                  const saved = await sendTaskToWorker('saveResourceBuffer', {
+                    url: innerAbs,
+                    buffer: innerBuf,
+                    headers: rr.headers,
+                    outputDir: recordState.outputDir
+                  });
                   if (saved) {
-                    // saved is relative path under outputDir; expose via /playback/<rel>
                     const rel = toSnapshotRelative(saved.replace(/\\/g, "/"), filePath);
                     cssText = cssText.split(m[0]).join(`url(${rel})`);
                   }
@@ -568,9 +646,13 @@ const captureHtmlSnapshot = async (page, actionDescription = "initial") => {
               }
             }
 
-            // 保存修改后的 CSS 到本地
-            // r is loop variable for resourceAttrs earlier; here we don't have it. Use fetched.headers
-            const savedCssPath = await saveResourceBuffer(absolute, Buffer.from(cssText, "utf8"), fetched.headers || {});
+            // 保存修改后的 CSS（通过Worker）
+            const savedCssPath = await sendTaskToWorker('saveResourceBuffer', {
+              url: absolute,
+              buffer: Buffer.from(cssText, "utf8"),
+              headers: fetched.headers,
+              outputDir: recordState.outputDir
+            });
             if (savedCssPath) {
               // 更新所有引用该 CSS 的元素的 href 为相对路径
               const rel = toSnapshotRelative(savedCssPath.replace(/\\/g, "/"), filePath);
@@ -579,9 +661,13 @@ const captureHtmlSnapshot = async (page, actionDescription = "initial") => {
               }
             }
           } else {
-            // 普通资源（JS/图片/font等），直接保存为二进制
-            // 保存普通资源，使用 fetch 返回的 headers
-            const saved = await saveResourceBuffer(absolute, buffer, fetched.headers || {});
+            // 普通资源（JS/图片/font等），保存为二进制（通过Worker）
+            const saved = await sendTaskToWorker('saveResourceBuffer', {
+              url: absolute,
+              buffer: buffer,
+              headers: fetched.headers,
+              outputDir: recordState.outputDir
+            });
             if (saved) {
               const rel = toSnapshotRelative(saved.replace(/\\/g, "/"), filePath);
               for (const item of info.elements) {
@@ -638,8 +724,11 @@ const captureHtmlSnapshot = async (page, actionDescription = "initial") => {
     // 添加捕获信息作为注释
     const fullHtmlWithInfo = `<!-- \nCaptured at: ${timestamp}\nAction: ${actionDescription}\nURL: ${url}\nTitle: ${title}\n-->\n${fullHtml}`;
 
-    // 保存HTML到单独文件
-    await fs.writeFile(filePath, fullHtmlWithInfo, "utf8");
+    // 保存HTML到单独文件（通过Worker处理）
+    await sendTaskToWorker('writeHtmlFile', {
+      filePath,
+      content: fullHtmlWithInfo
+    });
 
     // 保存快照元数据
     const htmlSnapshot = {
@@ -698,7 +787,7 @@ const startRecord = async (page) => {
 };
 
 /**
- * 停止录制：保存所有原始请求/响应数据和HTML快照（不修改任何内容）
+ * 停止录制：保存所有原始请求/响应数据和HTML快照（通过Worker处理）
  */
 const stopRecord = async () => {
   if (!recordState.isRecording) {
@@ -711,15 +800,23 @@ const stopRecord = async () => {
     // 1. 确保输出目录存在
     await fs.ensureDir(recordState.outputDir);
 
-    // 2. 原封不动保存所有请求数据（格式化便于查看，数据无修改）
+    // 2. 原封不动保存所有请求数据（通过Worker）
     const requestsFilePath = path.resolve(recordState.outputDir, "raw-requests.json");
-    await fs.writeFile(requestsFilePath, JSON.stringify(recordState.allRequests, null, 2), "utf8");
+    await sendTaskToWorker('writeJsonFile', {
+      filePath: requestsFilePath,
+      data: recordState.allRequests,
+      pretty: true
+    });
 
-    // 3. 保存HTML快照元数据（仅包含元数据，不包含HTML内容本身）
+    // 3. 保存HTML快照元数据（通过Worker）
     const htmlSnapshotsMetadataPath = path.resolve(recordState.outputDir, "html-snapshots-metadata.json");
-    await fs.writeFile(htmlSnapshotsMetadataPath, JSON.stringify(recordState.htmlSnapshots, null, 2), "utf8");
+    await sendTaskToWorker('writeJsonFile', {
+      filePath: htmlSnapshotsMetadataPath,
+      data: recordState.htmlSnapshots,
+      pretty: true
+    });
 
-    // 4. 生成录制汇总（仅统计信息，不修改原始数据）
+    // 4. 生成录制汇总（通过Worker）
     const summary = {
       recordTime: new Date().toISOString(),
       totalRequests: recordState.allRequests.length,
@@ -734,7 +831,14 @@ const stopRecord = async () => {
       tips: "所有请求/响应和HTML数据均为原始格式，未做任何修改",
     };
     const summaryFilePath = path.resolve(recordState.outputDir, "record-summary.json");
-    await fs.writeFile(summaryFilePath, JSON.stringify(summary, null, 2), "utf8");
+    await sendTaskToWorker('writeJsonFile', {
+      filePath: summaryFilePath,
+      data: summary,
+      pretty: true
+    });
+
+    // 等待所有写入任务完成
+    await waitForAllTasks();
 
     console.log("\n====================================");
     console.log(`✅ 录制停止！共捕获 ${recordState.allRequests.length} 条请求`);
@@ -778,10 +882,10 @@ const initBrowser = async (initUrl) => {
     const page = await context.newPage();
     // 优雅导航：先尝试 networkidle，失败则回退到 domcontentloaded
     try {
-      await page.goto(initUrl, { waitUntil: "networkidle", timeout: 120000 });
+      await page.goto(initUrl, { waitUntil: "networkidle", timeout: 120 });
     } catch (err) {
       console.warn("⚠️ networkidle 导航失败，降级到 domcontentloaded：", err.message);
-      await page.goto(initUrl, { waitUntil: "domcontentloaded", timeout: 120000 }).catch(() => {});
+      await page.goto(initUrl, { waitUntil: "domcontentloaded", timeout: 120 }).catch(() => {});
     }
 
     // 在初始加载后捕获一次HTML
@@ -805,9 +909,10 @@ const initBrowser = async (initUrl) => {
       } else if (cmd === "stop") {
         await stopRecord();
       } else if (cmd === "exit") {
-        // 只有在退出时才关闭浏览器
+        // 退出时关闭Worker和浏览器
+        await closeWriterWorker();
         await browser.close();
-        console.log("👋 已关闭浏览器，退出程序");
+        console.log("👋 已关闭浏览器和Worker，退出程序");
         process.exit(0);
       } else if (cmd) {
         console.log(`⚠️ 未知指令：${cmd}，支持指令：start/stop/exit`);
@@ -817,6 +922,8 @@ const initBrowser = async (initUrl) => {
     return page;
   } catch (error) {
     console.error("❌ 初始化浏览器失败：", error);
+    // 出错时关闭Worker
+    await closeWriterWorker();
     process.exit(1);
   }
 };
@@ -824,13 +931,15 @@ const initBrowser = async (initUrl) => {
 /**
  * 主函数：仅初始化目录和浏览器，聚焦请求捕获
  */
-const 
-manualRecordPage = async (initUrl, outputDir) => {
+const manualRecordPage = async (initUrl, outputDir) => {
   try {
     // 默认输出到项目的 assets/html/record-requests 目录，便于前端访问
     const defaultOutput = path.resolve(__dirname, "../../assets/html/record-requests");
     const finalOutput = outputDir || defaultOutput;
+    
+    // 初始化输出目录（同时初始化Worker）
     await initOutputDir(finalOutput);
+    
     const page = await initBrowser(initUrl);
 
     // 支持自动录制模式：传入 --autostart 开始录制，传入 --duration=SECONDS 指定录制时长
@@ -845,9 +954,10 @@ manualRecordPage = async (initUrl, outputDir) => {
       setTimeout(
         async () => {
           await stopRecord();
-          console.log("🔚 自动录制完成");
-          // 关闭浏览器并退出
+          // 自动模式下退出时关闭Worker和浏览器
+          await closeWriterWorker();
           await recordState.browser.close();
+          console.log("🔚 自动录制完成，已退出");
           process.exit(0);
         },
         Math.max(5000, duration * 1000),
@@ -855,6 +965,8 @@ manualRecordPage = async (initUrl, outputDir) => {
     }
   } catch (error) {
     console.error("❌ 程序初始化出错：", error);
+    // 出错时关闭Worker
+    await closeWriterWorker();
     process.exit(1);
   }
 };
