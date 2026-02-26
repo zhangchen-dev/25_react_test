@@ -230,9 +230,6 @@ const listenPageRequests = (page) => {
   page.on("response", async (response) => {
     if (!recordState.isRecording) return;
     const request = response.request();
-    if (request.url()?.includes("scene-solution/list") || request.url()?.includes("banner-list")) {
-      console.log("%c 🌷🌷🌷🌷[  ]-77", "font-size:13px; background:#a0fdec; color:#e4ffff;");
-    }
     // 匹配对应的请求记录
     const reqRecord = recordState.allRequests.find((item) => {
       // 匹配URL和方法，以及页面URL
@@ -261,6 +258,7 @@ const listenPageRequests = (page) => {
       console.log(`📤 [${requestId}] New request captured: ${request.method()} ${request.url()}`);
     }
 
+    // todoooooo
     if (!reqRecord) return;
 
     try {
@@ -306,7 +304,7 @@ const listenPageRequests = (page) => {
         headers: response.headers(), // 原始响应头
         localPath: localPath, // 相对于 outputDir 的资源路径
         bodySize: responseBody ? responseBody.length : 0,
-        timing: response.timing(), // 响应时间戳
+        timing: new Date().getTime() - new Date(reqRecord.timestamp).getTime(), // 响应时间（毫秒）
       };
 
       // 原封不动填充响应数据（不将原始二进制直接嵌入 JSON，节省空间）
@@ -882,10 +880,10 @@ const initBrowser = async (initUrl) => {
     const page = await context.newPage();
     // 优雅导航：先尝试 networkidle，失败则回退到 domcontentloaded
     try {
-      await page.goto(initUrl, { waitUntil: "networkidle", timeout: 120 });
+      await page.goto(initUrl, { waitUntil: "networkidle", timeout: 10000 });
     } catch (err) {
       console.warn("⚠️ networkidle 导航失败，降级到 domcontentloaded：", err.message);
-      await page.goto(initUrl, { waitUntil: "domcontentloaded", timeout: 120 }).catch(() => {});
+      await page.goto(initUrl, { waitUntil: "domcontentloaded", timeout: 10000 }).catch(() => {});
     }
 
     // 在初始加载后捕获一次HTML
