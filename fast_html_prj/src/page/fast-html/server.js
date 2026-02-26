@@ -11,8 +11,8 @@ app.use(cors());
 app.use(express.json());
 
 // 前端调用的接口：启动录制脚本
-app.post('/start-record', (req, res) => {
-  const { targetUrl, duration } = req.body || {};
+app.post('/start-record', async (req, res) => {
+  const { targetUrl, duration, clearExisting } = req.body || {};
 
   // Basic validation of URL
   if (!targetUrl) return res.status(400).json({ message: 'missing targetUrl' });
@@ -26,6 +26,42 @@ app.post('/start-record', (req, res) => {
 
   const recordScriptPath = path.resolve(__dirname, 'playWright.js');
   const outCwd = path.join(__dirname, '../../assets/html');
+
+  // Check for existing recordings for this host and ask for confirmation
+  const recordRequestsDir = path.join(outCwd, 'record-requests');
+  try {
+    await fs.ensureDir(recordRequestsDir);
+  } catch (e) {
+    // ignore - will attempt to continue
+  }
+  const hostname = parsed.hostname || '';
+  let existingFiles = [];
+  try {
+    const entries = await fs.readdir(recordRequestsDir);
+    existingFiles = entries.filter(f => hostname && f.includes(hostname));
+  } catch (e) {
+    existingFiles = [];
+  }
+
+  if (existingFiles.length > 0) {
+    if (clearExisting === undefined) {
+      return res.status(409).json({
+        message: 'existing recordings found for this host',
+        files: existingFiles,
+        prompt: 'set clearExisting true to delete them, false to keep and overwrite'
+      });
+    }
+    if (clearExisting === true) {
+      try {
+        for (const f of existingFiles) {
+          await fs.remove(path.join(recordRequestsDir, f));
+        }
+      } catch (e) {
+        return res.status(500).json({ message: 'failed to clear existing recordings', error: e.message });
+      }
+    }
+    // if clearExisting === false -> keep existing files; new recordings will overwrite corresponding files
+  }
 
   // prepare args: [script, url, --autostart, --duration=...]
   // 仅当 duration 存在时才自动录制，否则进入交互模式
