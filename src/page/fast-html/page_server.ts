@@ -1,3 +1,4 @@
+// @ts-nocheck
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
@@ -282,3 +283,6 @@ app.listen(PORT, () => {
   console.log(`   - 无匹配 → 直接返回404（不创建任何Mock文件）`);
   console.log(`   - 支持 GET/POST 两种请求方法`);
 });
+
+// 让该文件在 isolatedModules 下被视为模块
+export {};

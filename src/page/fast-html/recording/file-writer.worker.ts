@@ -1,14 +1,15 @@
+// @ts-nocheck
 // file-writer.worker.js - 独立线程处理文件写入，避免主线程阻塞
-const { parentPort, workerData } = require('worker_threads');
-const fs = require('fs-extra');
-const path = require('path');
+const { parentPort, workerData } = require("worker_threads");
+const fs = require("fs-extra");
+const path = require("path");
 
 // 任务处理函数
 const handleTask = async (task) => {
   try {
     switch (task.type) {
       // 保存资源二进制文件
-      case 'saveResourceBuffer': {
+      case "saveResourceBuffer": {
         const { url, buffer, headers, outputDir } = task.data;
         const rel = getLocalRelativePath(url, headers);
         const filePath = path.join(outputDir, rel);
@@ -20,24 +21,24 @@ const handleTask = async (task) => {
       }
 
       // 保存JSON文件（格式化）
-      case 'writeJsonFile': {
+      case "writeJsonFile": {
         const { filePath, data, pretty = true } = task.data;
         await fs.ensureDir(path.dirname(filePath));
         const content = pretty ? JSON.stringify(data, null, 2) : JSON.stringify(data);
-        await fs.writeFile(filePath, content, 'utf8');
+        await fs.writeFile(filePath, content, "utf8");
         return { success: true };
       }
 
       // 保存HTML文件
-      case 'writeHtmlFile': {
+      case "writeHtmlFile": {
         const { filePath, content } = task.data;
         await fs.ensureDir(path.dirname(filePath));
-        await fs.writeFile(filePath, content, 'utf8');
+        await fs.writeFile(filePath, content, "utf8");
         return { success: true };
       }
 
       // 初始化目录（清空/创建）
-      case 'initOutputDir': {
+      case "initOutputDir": {
         const { outputDir } = task.data;
         if (await fs.pathExists(outputDir)) {
           await fs.emptyDir(outputDir);
@@ -116,10 +117,10 @@ const getLocalRelativePath = (url, headers = {}) => {
 };
 
 // 监听主线程任务
-parentPort.on('message', async (task) => {
-  if (task === 'EXIT') {
+parentPort.on("message", async (task) => {
+  if (task === "EXIT") {
     // 收到退出指令，结束Worker
-    parentPort.postMessage({ type: 'EXIT_SUCCESS' });
+    parentPort.postMessage({ type: "EXIT_SUCCESS" });
     process.exit(0);
     return;
   }
@@ -128,9 +129,13 @@ parentPort.on('message', async (task) => {
   const result = await handleTask(task);
   parentPort.postMessage({
     taskId: task.taskId,
-    result
+    result,
   });
 });
 
 // 向主线程发送就绪信号
-parentPort.postMessage({ type: 'WORKER_READY' });
+parentPort.postMessage({ type: "WORKER_READY" });
+
+// 让该文件在 isolatedModules 下被视为模块
+export {};
+

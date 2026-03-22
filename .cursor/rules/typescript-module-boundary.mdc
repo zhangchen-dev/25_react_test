@@ -1,0 +1,27 @@
+---
+description: Ensure TypeScript files are treated as modules under isolatedModules
+globs: **/*.ts
+alwaysApply: false
+---
+
+# TypeScript Module Boundary
+
+在开启 `isolatedModules` 时，所有 `.ts` 文件都应是模块文件，避免被当作全局脚本。
+
+- 文件至少包含一个 `import` 或 `export`
+- 若文件是脚本风格且不需要导出成员，文件末尾添加 `export {}`
+- 新建 Node 脚本文件时优先写成模块结构，避免后续编译报错
+
+## Example
+
+```ts
+// ❌ BAD: 会被视为全局脚本
+const express = require("express");
+```
+
+```ts
+// ✅ GOOD: 明确是模块
+const express = require("express");
+export {};
+```
+

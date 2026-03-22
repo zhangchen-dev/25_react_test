@@ -1,0 +1,10 @@
+{
+  "files": {
+    "main.js": "/bundle.js",
+    "index.html": "/index.html",
+    "bundle.js.map": "/bundle.js.map"
+  },
+  "entrypoints": [
+    "bundle.js"
+  ]
+}

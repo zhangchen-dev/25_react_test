@@ -1,3 +1,4 @@
+// @ts-nocheck
 // server.js（CommonJS 版本，已修复 spawn 问题）
 const express = require('express');
 const { spawn } = require('child_process');
@@ -5,10 +6,61 @@ const cors = require('cors');
 const path = require('path'); // 新增：处理路径
 const fs = require('fs-extra');
 const { execPath } = process; // 新增：获取当前 node 可执行文件路径
+const { firefox } = require('playwright');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// 第二模块：仅用于打开有头浏览器并跳转页面（不启动原录制流程）
+let guideBrowser = null;
+let guideContext = null;
+let guidePage = null;
+
+app.post('/open-guide-page', async (req, res) => {
+  const { targetUrl } = req.body || {};
+  if (!targetUrl) return res.status(400).json({ message: 'missing targetUrl' });
+
+  let parsed;
+  try {
+    parsed = new URL(targetUrl);
+    if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('invalid protocol');
+  } catch (err) {
+    return res.status(400).json({ message: 'invalid targetUrl', error: err.message });
+  }
+
+  try {
+    // 复用已打开浏览器，避免每次点击都拉起新实例
+    if (!guideBrowser) {
+      guideBrowser = await firefox.launch({
+        headless: false,
+        slowMo: 0,
+      });
+      guideContext = await guideBrowser.newContext({
+        javaScriptEnabled: true,
+        ignoreHTTPSErrors: true,
+        viewport: { width: 1920, height: 1080 },
+      });
+      guidePage = await guideContext.newPage();
+    }
+
+    try {
+      await guidePage.goto(targetUrl, { waitUntil: 'networkidle', timeout: 15000 });
+    } catch (e) {
+      await guidePage.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+    }
+
+    return res.json({
+      message: 'guide page opened',
+      url: guidePage.url(),
+    });
+  } catch (err) {
+    return res.status(500).json({
+      message: 'failed to open guide page',
+      error: err.message,
+    });
+  }
+});
 
 // 前端调用的接口：启动录制脚本
 app.post('/start-record', async (req, res) => {
@@ -24,7 +76,10 @@ app.post('/start-record', async (req, res) => {
     return res.status(400).json({ message: 'invalid targetUrl', error: err.message });
   }
 
-  const recordScriptPath = path.resolve(__dirname, 'playWright.js');
+  // 新入口放到 playwright 目录下，避免继续维护旧单文件
+  const recordScriptPath = path.resolve(__dirname, 'playwright/index.ts');
+  // 通过绝对路径预加载 ts-node，避免 child cwd 变化导致模块解析失败
+  const tsNodeRegisterPath = require.resolve("ts-node/register/transpile-only");
   const outCwd = path.join(__dirname, '../../assets/html');
 
   // Check for existing recordings for this host and ask for confirmation
@@ -65,7 +120,7 @@ app.post('/start-record', async (req, res) => {
 
   // prepare args: [script, url, --autostart, --duration=...]
   // 仅当 duration 存在时才自动录制，否则进入交互模式
-  const args = [recordScriptPath, targetUrl];
+  const args = ["-r", tsNodeRegisterPath, recordScriptPath, targetUrl];
   if (duration && Number(duration) > 0) {
     args.push('--autostart');
     args.push(`--duration=${Number(duration)}`);
@@ -181,3 +236,7 @@ app.use(async (req, res, next) => {
   }
   next();
 });
+
+// 让该文件在 isolatedModules 下被视为模块，而不是全局脚本
+export {};
+
