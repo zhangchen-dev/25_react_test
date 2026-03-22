@@ -1,9 +1,9 @@
 // @ts-nocheck
 
 import path from "path";
-const cheerio = require("cheerio");
 import { recordState } from "./state";
 import { sendTaskToWorker } from "../recording/worker";
+const cheerio = require("cheerio");
 
 // 抓取层职责：
 // - 监听请求/响应并落盘资源

@@ -44,13 +44,7 @@ export const startRecord = async (page) => {
   console.log("====================================\n");
 };
 
-export const stopRecord = async () => {
-  if (!recordState.isRecording) {
-    console.log("⚠️ 未在录制中，无需停止");
-    return;
-  }
-  recordState.isRecording = false;
-
+const saveRecordedData = async () => {
   try {
     await fs.ensureDir(recordState.outputDir);
 
@@ -105,6 +99,15 @@ export const stopRecord = async () => {
   } catch (error) {
     console.error("❌ 保存请求数据失败：", error);
   }
+};
+
+export const stopRecord = async () => {
+  if (!recordState.isRecording) {
+    console.log("⚠️ 未在录制中，无需停止");
+    return;
+  }
+  recordState.isRecording = false;
+  await saveRecordedData();
 };
 
 export const initBrowser = async (initUrl) => {
@@ -169,12 +172,22 @@ export const initBrowser = async (initUrl) => {
 export const manualRecordPage = async (initUrl, outputDir) => {
   try {
     // __dirname = src/page/fast-html/recording
-    // 需要回到项目根目录再进入 assets/html/record-requests
-    const defaultOutput = path.resolve(__dirname, "../../../../assets/html/record-requests");
+    const defaultOutput = path.resolve(__dirname, "../../../../html-assets/record-requests");
     const finalOutput = outputDir || defaultOutput;
 
     await initOutputDir(finalOutput);
     const page = await initBrowser(initUrl);
+
+    // 从前端/服务启动时收到 SIGTERM 则先保存数据再退出（用户点击"关闭录制"）
+    const handleSigTerm = async () => {
+      console.log("\n📴 收到停止信号，正在保存录制数据...");
+      recordState.isRecording = false;
+      await saveRecordedData();
+      await closeWriterWorker();
+      if (recordState.browser) await recordState.browser.close();
+      process.exit(0);
+    };
+    process.on("SIGTERM", () => { handleSigTerm().catch((e) => { console.error(e); process.exit(1); }); });
 
     const argv = process.argv.slice(2).map((a) => a.trim());
     const auto = argv.includes("--autostart") || argv.includes("--auto");

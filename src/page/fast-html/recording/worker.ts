@@ -134,10 +134,9 @@ export const closeWriterWorker = async () => {
 };
 
 export const initOutputDir = async (outputDir) => {
+  recordState.outputDir = outputDir;
   await initWriterWorker();
   await sendTaskToWorker("initOutputDir", { outputDir });
-
-  recordState.outputDir = outputDir;
-  console.log(`📁 请求数据输出目录已初始化（已清空旧内容）：${path.resolve(outputDir)}`);
+  console.log(`📁 请求数据输出目录已初始化：${path.resolve(outputDir)}`);
 };
 
