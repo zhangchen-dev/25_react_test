@@ -12,6 +12,11 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// 统一响应格式工具函数
+function createResponse(body = null, status = 200, msg = 'success') {
+  return { body, status, msg };
+}
+
 // 用于打开有头浏览器并跳转页面（第二模块，不启动原录制流程）
 let guideBrowser = null;
 let guideContext = null;
@@ -19,14 +24,16 @@ let guidePage = null;
 
 app.post('/open-guide-page', async (req, res) => {
   const { targetUrl } = req.body || {};
-  if (!targetUrl) return res.status(400).json({ message: 'missing targetUrl' });
+  if (!targetUrl) {
+    return res.status(400).json(createResponse(null, 400, 'missing targetUrl'));
+  }
 
   let parsed;
   try {
     parsed = new URL(targetUrl);
     if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('invalid protocol');
   } catch (err) {
-    return res.status(400).json({ message: 'invalid targetUrl', error: err.message });
+    return res.status(400).json(createResponse(null, 400, 'invalid targetUrl: ' + err.message));
   }
 
   try {
@@ -37,13 +44,15 @@ app.post('/open-guide-page', async (req, res) => {
         slowMo: 0,
       }).catch(err => {
         console.error('Failed to launch browser:', err);
+        return res.status(500).json(createResponse(null, 500, 'failed to launch browser: ' + err.message));
       });
       guideContext = await guideBrowser.newContext({
         javaScriptEnabled: true,
         ignoreHTTPSErrors: true,
-        viewport: { width: 1920, height: 1080 },
+        viewport: { width: '100%', height: '100%' },
       }).catch(err => {
         console.error('Failed to create new context:', err);
+        return res.status(500).json(createResponse(null, 500, 'failed to create context: ' + err.message));
       });
       guidePage = await guideContext.newPage();
     }
@@ -54,15 +63,11 @@ app.post('/open-guide-page', async (req, res) => {
       await guidePage.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
     }
 
-    return res.json({
-      message: 'guide page opened',
+    return res.json(createResponse({
       url: guidePage.url(),
-    });
+    }, 200, 'guide page opened'));
   } catch (err) {
-    return res.status(500).json({
-      message: 'failed to open guide page',
-      error: err.message,
-    });
+    return res.status(500).json(createResponse(null, 500, 'failed to open guide page: ' + err.message));
   }
 });
 
@@ -71,13 +76,13 @@ app.post('/start-record', async (req, res) => {
   const { targetUrl, duration, clearExisting } = req.body || {};
 
   // Basic validation of URL
-  if (!targetUrl) return res.status(400).json({ message: 'missing targetUrl' });
+  if (!targetUrl) return res.status(400).json(createResponse(null, 400, 'missing targetUrl'));
   let parsed;
   try {
     parsed = new URL(targetUrl);
     if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('invalid protocol');
   } catch (err) {
-    return res.status(400).json({ message: 'invalid targetUrl', error: err.message });
+    return res.status(400).json(createResponse(null, 400, 'invalid targetUrl: ' + err.message));
   }
 
   // 获取录制脚本绝对路径
@@ -104,11 +109,10 @@ app.post('/start-record', async (req, res) => {
 
   if (existingFiles.length > 0) {
     if (clearExisting === undefined) {
-      return res.status(409).json({
-        message: 'existing recordings found for this host',
+      return res.status(409).json(createResponse({
         files: existingFiles,
         prompt: 'set clearExisting true to delete them, false to keep and overwrite'
-      });
+      }, 409, 'existing recordings found for this host'));
     }
     if (clearExisting === true) {
       try {
@@ -116,7 +120,7 @@ app.post('/start-record', async (req, res) => {
           await fs.remove(path.join(recordRequestsDir, f));
         }
       } catch (e) {
-        return res.status(500).json({ message: 'failed to clear existing recordings', error: e.message });
+        return res.status(500).json(createResponse(null, 500, 'failed to clear existing recordings: ' + e.message));
       }
     }
     // if clearExisting === false -> keep existing files; new recordings will overwrite corresponding files
@@ -183,7 +187,11 @@ app.post('/start-record', async (req, res) => {
     global.__recordProcesses.set(id, info);
   });
 
-  res.json({ message: 'recording started', id, pid: child.pid, script: recordScriptPath });
+  res.json(createResponse({ 
+    id, 
+    pid: child.pid, 
+    script: recordScriptPath 
+  }, 200, 'recording started'));
 });
 
 
@@ -204,13 +212,13 @@ app.post('/stop-record', (req, res) => {
       }
     }
   }
-  if (!info) return res.status(404).json({ message: 'recording not found' });
+  if (!info) return res.status(404).json(createResponse(null, 404, 'recording not found'));
   const { child } = info;
   try {
     child.kill('SIGTERM');
-    return res.json({ message: 'stopping', id });
+    return res.json(createResponse({ id }, 200, 'stopping'));
   } catch (err) {
-    return res.status(500).json({ message: 'stop failed', error: err.message });
+    return res.status(500).json(createResponse(null, 500, 'stop failed: ' + err.message));
   }
 });
 
@@ -220,16 +228,18 @@ app.get('/record-status', (req, res) => {
   for (const [k, v] of (global.__recordProcesses || new Map()).entries()) {
     list.push(Object.assign({ id: k }, { pid: v.child?.pid, targetUrl: v.targetUrl, startedAt: v.startedAt, exitCode: v.exitCode, exitedAt: v.exitedAt }));
   }
-  res.json(list);
+  res.json(createResponse(list, 200, 'success'));
 });
 
 // 获取日志（内存中最后若干行）
 app.get('/record-logs/:id', (req, res) => {
   const id = req.params.id;
   const info = global.__recordProcesses?.get(id);
-  if (!info) return res.status(404).json({ message: 'not found' });
-  res.json({ id, logs: info.logs || [] });
+  if (!info) return res.status(404).json(createResponse(null, 404, 'not found'));
+  res.json(createResponse({ id, logs: info.logs || [] }, 200, 'success'));
 });
+
+
 // 启动服务
 app.listen(3001, () => {
   console.log('后端服务运行在：http://localhost:3001');
@@ -255,5 +265,3 @@ app.use(async (req, res, next) => {
   }
   next();
 });
-
-

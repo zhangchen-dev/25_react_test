@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from "react";
 import { Button, Card, Col, Empty, Input, List, Row, Space, Tag, Typography, message } from "antd";
+import { openBrowser, startRecord } from "../https/requests";
 import "./RecordStepPanel.less";
 
 type PanelStatus = "idle" | "ready" | "picking" | "editing" | "finished";
@@ -14,10 +15,11 @@ type StepItem = {
   subTitle: string;
 };
 
-const buildMockPickedStep = (index: number, pageUrl: string): StepItem => ({
+const buildMockPickedStep = (index: number): StepItem => ({
+  // 从打开的浏览器中确定页面地址 点击元素等 
   stepIndex: index,
   stepType: "picked",
-  pageUrl,
+  pageUrl:'',
   elementId: `elem_mock_${Date.now()}_${index}`,
   elementDom: `<button id="mock-btn-${index}">示例按钮${index}</button>`,
   mainTitle: "",
@@ -34,7 +36,7 @@ const statusColorMap: Record<PanelStatus, string> = {
 
 const RecordStepPanel: React.FC = () => {
   const [status, setStatus] = useState<PanelStatus>("idle");
-  const [targetUrl, setTargetUrl] = useState("");
+  const [targetUrl, setTargetUrl] = useState("https://xft.cmbchina.com/");
   const [steps, setSteps] = useState<StepItem[]>([]);
   const [editingStep, setEditingStep] = useState<StepItem | null>(null);
   const [starting, setStarting] = useState(false);
@@ -49,7 +51,7 @@ const RecordStepPanel: React.FC = () => {
       addCustom: status !== "ready" && status !== "editing",
       targetUrlInput: status !== "idle",
     }),
-    [status, steps.length]
+    [status, steps.length],
   );
 
   const normalizedUrl = (url: string) => {
@@ -67,20 +69,11 @@ const RecordStepPanel: React.FC = () => {
 
     try {
       setStarting(true);
-      const response = await fetch("http://localhost:3001/start-record", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          targetUrl: safeUrl,
-          clearExisting: false,
-        }),
-      });
-      const data = await response.json().catch(() => ({}));
-
-      if (!response.ok) {
-        throw new Error(data?.message || "启动录入失败");
-      }
-
+      // 先打开浏览器
+      await openBrowser(safeUrl);
+      // 然后启动录制
+      await startRecord(safeUrl, false);
+      
       setTargetUrl(safeUrl);
       setSteps([]);
       setEditingStep(null);
@@ -100,7 +93,7 @@ const RecordStepPanel: React.FC = () => {
     // 页面框架阶段：使用模拟数据表示“下一次点击已采集”
     setTimeout(() => {
       const nextIndex = steps.length + 1;
-      const picked = buildMockPickedStep(nextIndex, targetUrl);
+      const picked = buildMockPickedStep(nextIndex);
       setEditingStep(picked);
       setStatus("editing");
     }, 300);
@@ -162,6 +155,7 @@ const RecordStepPanel: React.FC = () => {
             className="url-input"
             placeholder="请输入要打开的网址，如 https://example.com"
             value={targetUrl}
+            defaultValue={targetUrl}
             disabled={disabled.targetUrlInput}
             onChange={(e) => setTargetUrl(e.target.value)}
           />
@@ -224,24 +218,13 @@ const RecordStepPanel: React.FC = () => {
                 <Input value={editingStep.stepType} disabled />
 
                 <Typography.Text type="secondary">页面地址（自建步骤可编辑）</Typography.Text>
-                <Input
-                  value={editingStep.pageUrl}
-                  disabled={editingStep.stepType === "picked"}
-                  onChange={(e) => setEditingStep({ ...editingStep, pageUrl: e.target.value })}
-                />
+                <Input value={editingStep.pageUrl} disabled={editingStep.stepType === "picked"} onChange={(e) => setEditingStep({ ...editingStep, pageUrl: e.target.value })} />
 
                 <Typography.Text type="secondary">主标题</Typography.Text>
-                <Input
-                  value={editingStep.mainTitle}
-                  onChange={(e) => setEditingStep({ ...editingStep, mainTitle: e.target.value })}
-                />
+                <Input value={editingStep.mainTitle} onChange={(e) => setEditingStep({ ...editingStep, mainTitle: e.target.value })} />
 
                 <Typography.Text type="secondary">副标题</Typography.Text>
-                <Input.TextArea
-                  rows={3}
-                  value={editingStep.subTitle}
-                  onChange={(e) => setEditingStep({ ...editingStep, subTitle: e.target.value })}
-                />
+                <Input.TextArea rows={3} value={editingStep.subTitle} onChange={(e) => setEditingStep({ ...editingStep, subTitle: e.target.value })} />
 
                 <Typography.Text type="secondary">元素唯一ID（占位）</Typography.Text>
                 <Input value={editingStep.elementId || "待后续算法确定"} disabled />
@@ -258,4 +241,3 @@ const RecordStepPanel: React.FC = () => {
 };
 
 export default RecordStepPanel;
-
