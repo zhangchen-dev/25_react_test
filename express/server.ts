@@ -3,10 +3,14 @@
 const express = require('express');
 const { spawn } = require('child_process');
 const cors = require('cors');
-const path = require('path'); // 新增：处理路径
+const path = require('path');
 const fs = require('fs-extra');
-const { execPath } = process; // 新增：获取当前 node 可执行文件路径
-const { firefox } = require('playwright');
+const { execPath } = process;
+const { chromium } = require('playwright');
+const { createServer } = require('http');
+const { createWsServer } = require('../src/utils/ws'); // 修正路径
+// 导入用户操作监控注入函数
+const { injectUserActionMonitor } = require('../src/page/record-step/components/monitorActions');
 
 const app = express();
 app.use(cors());
@@ -17,13 +21,19 @@ function createResponse(body = null, status = 200, msg = 'success') {
   return { body, status, msg };
 }
 
-// 用于打开有头浏览器并跳转页面（第二模块，不启动原录制流程）
+// 创建 HTTP 服务器以便 WebSocket 使用
+const httpServer = createServer(app);
+
+// 创建 WebSocket 通信实例
+const ws = createWsServer(httpServer);
+
+// 用于打开有头浏览器并跳转页面（复用浏览器实例，支持是否启用自动录制）
 let guideBrowser = null;
 let guideContext = null;
 let guidePage = null;
 
 app.post('/open-guide-page', async (req, res) => {
-  const { targetUrl } = req.body || {};
+  const { targetUrl, isAutoRecord } = req.body || {};
   if (!targetUrl) {
     return res.status(400).json(createResponse(null, 400, 'missing targetUrl'));
   }
@@ -39,7 +49,8 @@ app.post('/open-guide-page', async (req, res) => {
   try {
     // 复用已打开浏览器，避免每次点击都拉起新实例
     if (!guideBrowser) {
-      guideBrowser = await firefox.launch({
+      // 使用 chromium 而不是 firefox，保持与原 ws 端点一致
+      guideBrowser = await chromium.launch({
         headless: false,
         slowMo: 0,
       }).catch(err => {
@@ -63,9 +74,22 @@ app.post('/open-guide-page', async (req, res) => {
       await guidePage.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
     }
 
+    // 如果 isAutoRecord 为 true，则启用 WebSocket 和用户行为监控
+    if (isAutoRecord) {
+      // 等待页面完全加载稳定后再添加监听和建立 WebSocket
+      await guidePage.waitForLoadState('networkidle');
+      
+      // 绑定通信
+      await ws.bindPlaywrightPage(guidePage);
+
+      // 开启全页面操作监听（点击/输入/选择/滚动/按键）
+      await injectUserActionMonitor(guidePage);
+    }
+
     return res.json(createResponse({
       url: guidePage.url(),
-    }, 200, 'guide page opened'));
+      isAutoRecord: !!isAutoRecord
+    }, 200, isAutoRecord ? 'guide page opened with auto recording' : 'guide page opened'));
   } catch (err) {
     return res.status(500).json(createResponse(null, 500, 'failed to open guide page: ' + err.message));
   }
@@ -239,9 +263,8 @@ app.get('/record-logs/:id', (req, res) => {
   res.json(createResponse({ id, logs: info.logs || [] }, 200, 'success'));
 });
 
-
 // 启动服务
-app.listen(3001, () => {
+httpServer.listen(3001, () => {
   console.log('后端服务运行在：http://localhost:3001');
   console.log('当前 Node 路径：', execPath);
   console.log('项目根目录：', __dirname);
