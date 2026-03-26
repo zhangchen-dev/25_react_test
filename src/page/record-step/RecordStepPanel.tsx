@@ -1,6 +1,8 @@
-import React, { useMemo, useState } from "react";
-import { Button, Card, Col, Empty, Input, List, Row, Space, Tag, Typography, message } from "antd";
-import { openBrowser, startRecord } from "../https/requests";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { Button, Card, Col, Empty, Input, List, Row, Space, Tag, Typography, message, Badge } from "antd";
+import { openBrowser } from "../https/requests";
+import { initWsMessageHandler, sendWsMessage, wsMessageHandler, closeWsConnection } from "../../utils/msgHandler";
+import type { UserActionMessage, BaseWsMessage, PlaywrightCommand } from "../../types/record";
 import "./RecordStepPanel.less";
 
 type PanelStatus = "idle" | "ready" | "picking" | "editing" | "finished";
@@ -14,17 +16,6 @@ type StepItem = {
   mainTitle: string;
   subTitle: string;
 };
-
-const buildMockPickedStep = (index: number): StepItem => ({
-  // 从打开的浏览器中确定页面地址 点击元素等 
-  stepIndex: index,
-  stepType: "picked",
-  pageUrl:'',
-  elementId: `elem_mock_${Date.now()}_${index}`,
-  elementDom: `<button id="mock-btn-${index}">示例按钮${index}</button>`,
-  mainTitle: "",
-  subTitle: "",
-});
 
 const statusColorMap: Record<PanelStatus, string> = {
   idle: "default",
@@ -40,6 +31,169 @@ const RecordStepPanel: React.FC = () => {
   const [steps, setSteps] = useState<StepItem[]>([]);
   const [editingStep, setEditingStep] = useState<StepItem | null>(null);
   const [starting, setStarting] = useState(false);
+  const [wsConnected, setWsConnected] = useState(false);
+  const [latestPickedStep, setLatestPickedStep] = useState<StepItem | null>(null); // 新增：存储最新拾取的步骤
+
+  const pendingPickRef = useRef(false);
+  const pickStepIndexRef = useRef(1);
+  const pickTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearPickTimeout = () => {
+    if (pickTimeoutRef.current) {
+      clearTimeout(pickTimeoutRef.current);
+      pickTimeoutRef.current = null;
+    }
+  };
+
+  // 使用通用消息处理器处理 WebSocket 消息
+  useEffect(() => {
+    const handleMessage = (wsMessage: UserActionMessage | BaseWsMessage) => {
+      // 处理连接状态消息
+      if (wsMessage.type === "ws-status") {
+        const statusData = wsMessage as any;
+        if (statusData.status === "connected") {
+          setWsConnected(true);
+        }
+        return;
+      }
+
+      // 处理错误和警告消息
+      if (wsMessage.type === "error") {
+        message.error((wsMessage as any)?.msg || "服务端错误");
+        setWsConnected(false);
+        return;
+      }
+      if (wsMessage.type === "warning") {
+        message.warning((wsMessage as any)?.msg || "服务端警告");
+        return;
+      }
+
+      // 仅在“拾取中”时处理 Playwright 回传
+      if (wsMessage.type === "playwright-message" && pendingPickRef.current) {
+        const payload = (wsMessage as any)?.payload;
+        if (payload?.type === "user-action") {
+          const data = payload?.data;
+          if (!data) return;
+          const actionType = data?.actionType;
+          if (actionType !== "click" && actionType !== "dblclick") return;
+
+          const elementDom = data?.target?.outerHTML || "";
+          const elementId = data?.target?.xpath || data?.target?.id || "";
+          const pageUrl = data?.url || "";
+
+          const picked: StepItem = {
+            stepIndex: pickStepIndexRef.current,
+            stepType: "picked",
+            pageUrl,
+            elementId,
+            elementDom,
+            mainTitle: "",
+            subTitle: "",
+          };
+
+          pendingPickRef.current = false;
+          clearPickTimeout();
+          setEditingStep(picked);
+          setStatus("editing");
+          message.success("已拾取到下一次点击的步骤信息");
+        }
+      }
+    };
+
+    // 注册消息处理器
+    initWsMessageHandler(handleMessage);
+
+    // 检查初始连接状态
+    const checkConnection = () => {
+      if (wsMessageHandler['ws'] && wsMessageHandler['ws'].readyState === WebSocket.OPEN) {
+        setWsConnected(true);
+      } else {
+        setWsConnected(false);
+      }
+    };
+    
+    // 初始检查
+    checkConnection();
+    
+    // 设置定时检查（每5秒）
+    const interval = setInterval(checkConnection, 5000);
+    
+    return () => {
+      clearInterval(interval);
+      clearPickTimeout();
+      // 组件卸载时不强制关闭连接，因为可能有其他组件在使用
+    };
+  }, []);
+
+  // 手动重连 WebSocket
+  const reconnectWs = () => {
+    closeWsConnection(true); // 强制关闭现有连接
+    setTimeout(() => {
+      initWsMessageHandler((msg) => {
+        // 重新注册相同的处理逻辑
+        const handleMessage = (wsMessage: UserActionMessage | BaseWsMessage) => {
+          if (wsMessage.type === "ws-status") {
+            const statusData = wsMessage as any;
+            if (statusData.status === "connected") {
+              setWsConnected(true);
+            }
+            return;
+          }
+          if (wsMessage.type === "error") {
+            message.error((wsMessage as any)?.msg || "服务端错误");
+            setWsConnected(false);
+            return;
+          }
+          if (wsMessage.type === "warning") {
+            message.warning((wsMessage as any)?.msg || "服务端警告");
+            return;
+          }
+          if (wsMessage.type === "user-action-monitor-status") {
+            const statusData = wsMessage as any;
+            console.log('🎯 用户操作监控状态:', statusData);
+            return;
+          }
+          if (wsMessage.type === "playwright-message") {
+            const payload = (wsMessage as any)?.payload;
+            if (payload?.type === "user-action") {
+              const data = payload?.data;
+              if (!data) return;
+              const actionType = data?.actionType;
+              if (actionType !== "click" && actionType !== "dblclick") return;
+
+              const elementDom = data?.target?.outerHTML || "";
+              const elementId = data?.target?.xpath || data?.target?.id || "";
+              const pageUrl = data?.url || "";
+
+              const picked: StepItem = {
+                stepIndex: pickStepIndexRef.current,
+                stepType: "picked",
+                pageUrl,
+                elementId,
+                elementDom,
+                mainTitle: "",
+                subTitle: "",
+              };
+
+              setLatestPickedStep(picked);
+              
+              if (pendingPickRef.current) {
+                pendingPickRef.current = false;
+                clearPickTimeout();
+                setEditingStep(picked);
+                setStatus("editing");
+                message.success("已拾取到下一次点击的步骤信息");
+              } else {
+                message.info("检测到页面点击，已记录为最新拾取步骤");
+              }
+            }
+          }
+        };
+        handleMessage(msg);
+      });
+    }, 100);
+    message.info('正在尝试重新连接 WebSocket...');
+  };
 
   const disabled = useMemo(
     () => ({
@@ -69,16 +223,17 @@ const RecordStepPanel: React.FC = () => {
 
     try {
       setStarting(true);
-      // 先打开浏览器
-      await openBrowser(safeUrl);
-      // 然后启动录制
-      await startRecord(safeUrl, false);
+      // 打开页面并启用“拾取下一次点击”的注入监控 + WS 绑定
+      await openBrowser(safeUrl, true);
+      // 等 WS 通道就绪后进入“录入准备”
+      // WebSocket 连接已在 useEffect 中初始化
       
       setTargetUrl(safeUrl);
       setSteps([]);
       setEditingStep(null);
+      setLatestPickedStep(null); // 重置最新拾取步骤
       setStatus("ready");
-      message.success("已触发 start-record，Playwright 正在启动有头浏览器");
+      message.success("页面已打开，WS 通道和拾取监控已就绪");
     } catch (error: any) {
       message.error(`启动失败：${error?.message || "请检查后端服务是否运行在 3001"}`);
     } finally {
@@ -88,15 +243,39 @@ const RecordStepPanel: React.FC = () => {
 
   const onPickCurrentStep = () => {
     if (status !== "ready") return;
+
+    clearPickTimeout();
+    pendingPickRef.current = true;
+    const nextIndex = steps.length + 1;
+    pickStepIndexRef.current = nextIndex;
+    setEditingStep(null);
     setStatus("picking");
 
-    // 页面框架阶段：使用模拟数据表示“下一次点击已采集”
-    setTimeout(() => {
-      const nextIndex = steps.length + 1;
-      const picked = buildMockPickedStep(nextIndex);
-      setEditingStep(picked);
-      setStatus("editing");
-    }, 300);
+    try {
+      // 使用通用消息处理器发送消息
+      const pickMessage: PlaywrightCommand = {
+        type: 'monitor-set-pick-mode',
+        enabled: true,
+        timestamp: Date.now()
+      };
+      
+      if (sendWsMessage(pickMessage)) {
+        pickTimeoutRef.current = setTimeout(() => {
+          if (!pendingPickRef.current) return;
+          pendingPickRef.current = false;
+          setStatus("ready");
+          message.warning("拾取超时，请在已打开的页面点击目标元素");
+        }, 30000);
+      } else {
+        pendingPickRef.current = false;
+        setStatus("ready");
+        message.error("拾取指令发送失败：WebSocket 连接未建立");
+      }
+    } catch (e: any) {
+      pendingPickRef.current = false;
+      setStatus("ready");
+      message.error(`拾取指令发送失败：${e?.message || "未知错误"}`);
+    }
   };
 
   const onFinishCurrentStep = () => {
@@ -123,8 +302,15 @@ const RecordStepPanel: React.FC = () => {
 
   const onEndRecord = () => {
     if (status === "idle" || status === "picking") return;
+    
+    // 结束录制时断开 WebSocket 连接
+    closeWsConnection(true);
+    setWsConnected(false);
+    
     setEditingStep(null);
+    setLatestPickedStep(null);
     setStatus("finished");
+    message.success("录制已结束，WebSocket 连接已断开");
   };
 
   const onExport = () => {
@@ -144,9 +330,17 @@ const RecordStepPanel: React.FC = () => {
           <h2 className="panel-title">录制面板（第二模块）</h2>
           <p className="panel-subtitle">用于录入指引步骤，不影响原有录制页面功能。</p>
         </div>
-        <Tag className="status-tag" color={statusColorMap[status]}>
-          状态：{status}
-        </Tag>
+        <Space>
+          <Badge status={wsConnected ? "success" : "error"} text={wsConnected ? "WS已连接" : "WS未连接"} />
+          {!wsConnected && (
+            <Button size="small" onClick={reconnectWs}>
+              重连 WS
+            </Button>
+          )}
+          <Tag className="status-tag" color={statusColorMap[status]}>
+            状态：{status}
+          </Tag>
+        </Space>
       </header>
 
       <Card className="panel-block" title="录入准备">
@@ -211,7 +405,32 @@ const RecordStepPanel: React.FC = () => {
         <Col xs={24} lg={12}>
           <Card className="panel-block" title="当前步骤编辑">
             {!editingStep ? (
-              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="请选择“拾取当前步骤”或“新增自建步骤”" />
+              latestPickedStep ? (
+                <div className="form">
+                  <Typography.Text type="secondary">最新拾取步骤（可点击“完成当前步骤”保存）</Typography.Text>
+                  <Typography.Text strong>页面地址：</Typography.Text>
+                  <Input value={latestPickedStep.pageUrl} disabled />
+                  
+                  <Typography.Text strong>元素选择器：</Typography.Text>
+                  <Input value={latestPickedStep.elementId} disabled />
+                  
+                  <Typography.Text strong>元素DOM：</Typography.Text>
+                  <Input.TextArea value={latestPickedStep.elementDom} disabled rows={3} />
+                  
+                  <Button 
+                    type="primary" 
+                    onClick={() => {
+                      setEditingStep(latestPickedStep);
+                      setStatus("editing");
+                    }}
+                    style={{ marginTop: '10px' }}
+                  >
+                    编辑此步骤
+                  </Button>
+                </div>
+              ) : (
+                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="请选择“拾取当前步骤”或“新增自建步骤”" />
+              )
             ) : (
               <div className="form">
                 <Typography.Text type="secondary">步骤类型</Typography.Text>

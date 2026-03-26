@@ -1,4 +1,5 @@
 import { Page } from 'playwright';
+import type { UserActionMessage, BaseWsMessage } from '../../src/types/record';
 
 export interface MonitorOptions {
   ignoreEvents?: string[];
@@ -16,6 +17,7 @@ export interface UserActionData {
     className: string;
     text?: string;
     xpath: string;
+    outerHTML?: string;
     position?: {
       x: number;
       y: number;
@@ -37,14 +39,9 @@ export interface UserActionData {
   isAlt?: boolean;
 }
 
-export interface UserActionMessage {
-  type: 'user-action';
-  data: UserActionData;
-}
-
 declare global {
   interface Window {
-    sendToServer: (data: UserActionMessage) => void;
+    sendToServer: (data: UserActionMessage | BaseWsMessage) => void;
   }
 }
 
@@ -53,6 +50,12 @@ export const injectUserActionMonitor = async (page: Page, options?: MonitorOptio
   const { ignoreEvents = ["mousemove"], debounceTime = 200 } = options || {};
   
   await page.evaluate(({ ignoreEvents, debounceTime }) => {
+    // 由后端通过 WS 指令开启拾取模式：只在该模式下上报“下一次点击”
+    (window as any).__recordStepPickMode = (window as any).__recordStepPickMode ?? false;
+    // 防止重复注入导致重复上报
+    if ((window as any).__recordStepUserActionMonitorInjected) return;
+    (window as any).__recordStepUserActionMonitorInjected = true;
+
     // ========== 工具函数：防抖 ==========
     const debounce = <T extends (...args: unknown[]) => void>(fn: T, delay: number): ((...args: Parameters<T>) => void) => {
       let timer: NodeJS.Timeout | null = null;
@@ -111,6 +114,7 @@ export const injectUserActionMonitor = async (page: Page, options?: MonitorOptio
               className: target.className || '',
               text: target.textContent?.trim().substring(0, 100) || "",
               xpath: getElementXPath(target),
+              outerHTML: (target as any).outerHTML || "",
               position: {
                 x: mouseEvent.clientX,
                 y: mouseEvent.clientY,
@@ -191,18 +195,24 @@ export const injectUserActionMonitor = async (page: Page, options?: MonitorOptio
     };
 
     // ========== 注册全局事件监听 ==========
-    const eventsToListen = ["click", "dblclick", "contextmenu", "input", "change", "scroll", "keydown"];
+    // 按需求文档：只在“拾取当前步骤”时监听下一次用户点击
+    const eventsToListen = ["click", "dblclick"];
 
     eventsToListen.forEach((eventType) => {
       if (ignoreEvents.includes(eventType)) return;
 
       // 高频事件防抖处理
       const handler = (event: Event) => {
+        const pickMode = (window as any).__recordStepPickMode === true;
+        if (!pickMode) return;
         const eventData = formatEventData(eventType, event);
         sendAction(eventData);
+        // 已拾取到下一次点击：立刻关闭拾取模式，避免重复采集
+        (window as any).__recordStepPickMode = false;
       };
 
-      const finalHandler = ["input", "scroll"].includes(eventType) ? debounce(handler, debounceTime) : handler;
+      // 当前拾取模式只监听 click/dblclick，无需防抖
+      const finalHandler = handler;
 
       // 捕获阶段监听（确保能监听到所有元素）
       document.addEventListener(eventType, finalHandler, true);

@@ -29,12 +29,13 @@ async function handleRequest<T>(url: string, options: RequestInit): Promise<T> {
 }
 
 // 调用后端接口打开有头浏览器（用于第二模块）
-export const openBrowser = (fullUrl: string) =>
+export const openBrowser = (fullUrl: string, isAutoRecord: boolean = false) =>
   handleRequest<{ url: string }>(`${API_BASE_URL}/open-guide-page`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       targetUrl: fullUrl,
+      isAutoRecord,
     }),
   });
 
